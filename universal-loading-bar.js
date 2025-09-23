@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Loading Bar
 // @namespace    https://rogger-helper
-// @version      1.1.0
+// @version      1.2.0
 // @description  Shows a thin, minimal loading bar at the very top of every page; works with page loads, SPA navigations, fetch, and XHR.
 // @author       you
 // @match        *://*/*
@@ -256,6 +256,11 @@
         /hotjar/i,
         /mixpanel/i,
         /amplitude/i,
+        // GraphQL and API patterns
+        /\/graphql\b/i,          // GraphQL endpoints
+        /\/api\/graphql/i,       // Common GraphQL API paths
+        /\/gql\b/i,              // Short GraphQL endpoints
+        /query.*graphql/i,       // GraphQL in query params
         // Media streaming (HLS, DASH, etc.)
         /\.m3u8$/i,              // HLS playlist files
         /\.ts$/i,                // HLS video segments
