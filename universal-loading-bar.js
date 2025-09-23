@@ -14,7 +14,7 @@
     'use strict';
   
     // ---- Config (tweak to taste) ----
-    const BAR_HEIGHT_PX = 2;
+    const BAR_HEIGHT_PX = 3;
     const BAR_COLOR = '#29d';      // any CSS color
     const BAR_BG = 'transparent';  // background behind the progress line
     const Z_INDEX = 2147483647;    // top-most
