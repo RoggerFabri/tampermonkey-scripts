@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Loading Bar
 // @namespace    https://rogger-helper
-// @version      1.0.0
+// @version      1.1.0
 // @description  Shows a thin, minimal loading bar at the very top of every page; works with page loads, SPA navigations, fetch, and XHR.
 // @author       you
 // @match        *://*/*
@@ -18,7 +18,8 @@
     const BAR_COLOR = '#29d';      // any CSS color
     const BAR_BG = 'transparent';  // background behind the progress line
     const Z_INDEX = 2147483647;    // top-most
-    const MAX_IDLE_MS = 700;       // finish bar after this since last network activity
+    const MAX_IDLE_MS = 500;       // finish bar after this since last network activity (reduced)
+    const MAX_LOADING_MS = 4000;   // force finish after this total time
     const START_AT = 0.1;          // initial progress
     const TRICKLE_TO = 0.85;       // auto-advance ceiling while loading
     const TRICKLE_RATE = 0.02;     // per tick increment (smaller = smoother)
@@ -40,6 +41,7 @@
       timer: null,
       activeLoads: 0,
       lastActivity: Date.now(),
+      startTime: null,
       running: false,
       bar: null,
       barInner: null,
@@ -122,23 +124,44 @@
       showBar();
       setProgress(Math.max(state.progress, START_AT));
       state.running = true;
-  
+      state.startTime = Date.now();
+
       // trickle loop
       function tick() {
         if (!state.running) return;
-        // If still loading, trickle toward TRICKLE_TO
-        if (state.progress < TRICKLE_TO) {
-          setProgress(Math.min(TRICKLE_TO, state.progress + TRICKLE_RATE * (1 - state.progress)));
-        }
-  
-        // If idle long enough and we’ve seen activity before, finish
-        const idle = Date.now() - state.lastActivity;
+        
+        const now = Date.now();
+        const idle = now - state.lastActivity;
+        const totalTime = now - state.startTime;
         const docComplete = document.readyState === 'complete';
-        if (idle > MAX_IDLE_MS && state.activeLoads === 0 && docComplete) {
+        
+        // Force finish if we've been loading too long
+        if (totalTime > MAX_LOADING_MS) {
           finish();
           return;
         }
-  
+        
+        // More aggressive completion for SPAs
+        const shouldFinish = (
+          // Standard conditions
+          (idle > MAX_IDLE_MS && state.activeLoads === 0 && docComplete) ||
+          // SPA-friendly conditions: if doc is complete and we're idle for shorter time
+          (docComplete && state.activeLoads === 0 && idle > 200 && totalTime > 1000) ||
+          // Emergency finish: if we're near the end and have been idle
+          (state.progress > 0.9 && idle > 300 && state.activeLoads === 0)
+        );
+        
+        if (shouldFinish) {
+          finish();
+          return;
+        }
+        
+        // If still loading, trickle toward TRICKLE_TO, but speed up near the end
+        if (state.progress < TRICKLE_TO) {
+          const speedMultiplier = totalTime > 2000 ? 2 : 1; // Speed up after 2s
+          setProgress(Math.min(TRICKLE_TO, state.progress + (TRICKLE_RATE * speedMultiplier) * (1 - state.progress)));
+        }
+
         state.timer = setTimeout(tick, TICK_MS);
       }
       tick();
@@ -214,28 +237,93 @@
       });
     })();
   
+    // ---- Request filtering for better UX ----
+    function shouldTrackRequest(url, method = 'GET') {
+      // Skip common background/analytics requests
+      const skipPatterns = [
+        /analytics/i,
+        /tracking/i,
+        /telemetry/i,
+        /metrics/i,
+        /beacon/i,
+        /pixel/i,
+        /ads?[\/\?]/i,
+        /doubleclick/i,
+        /googletagmanager/i,
+        /facebook\.com\/tr/i,
+        /google-analytics/i,
+        /gtag/i,
+        /hotjar/i,
+        /mixpanel/i,
+        /amplitude/i,
+        // Media streaming (HLS, DASH, etc.)
+        /\.m3u8$/i,              // HLS playlist files
+        /\.ts$/i,                // HLS video segments
+        /\.aac$/i,               // HLS audio segments
+        /HLS_.*\.(ts|aac|mp4)$/i, // HLS segments with naming pattern
+        /DASH_.*\.mp4$/i,        // DASH video segments
+        /chunk_\d+\.(ts|mp4)$/i, // Generic streaming chunks
+        /segment_\d+\.(ts|mp4)$/i, // Generic streaming segments
+        // Reddit-specific patterns
+        /\/api\/v1\/sendbird/i,  // Reddit chat
+        /\/api\/v1\/gold/i,      // Reddit premium checks
+        /\/svc\/shreddit/i,      // Reddit telemetry
+        /\/api\/v1\/me\/prefs/i, // Preference syncing
+        /rdt\.gif/i,             // Reddit tracking pixel
+        /\/api\/v1\/me\/karma/i, // Karma updates
+      ];
+
+      // Skip OPTIONS requests (preflight)
+      if (method === 'OPTIONS') return false;
+      
+      // Skip data URLs and blob URLs
+      if (url.startsWith('data:') || url.startsWith('blob:')) return false;
+      
+      // Check against skip patterns
+      return !skipPatterns.some(pattern => pattern.test(url));
+    }
+
     // ---- Hook fetch/XHR to reflect network activity ----
     (function hookFetch() {
       if (!window.fetch) return;
       const _fetch = window.fetch.bind(window);
       window.fetch = function (...args) {
-        beginLoad();
+        const url = args[0]?.toString() || '';
+        const options = args[1] || {};
+        const method = options.method || 'GET';
+        
+        if (shouldTrackRequest(url, method)) {
+          beginLoad();
+        }
+        
         return _fetch(...args)
-          .then((res) => { endLoad(); return res; })
-          .catch((err) => { endLoad(); throw err; });
+          .then((res) => { 
+            if (shouldTrackRequest(url, method)) {
+              endLoad(); 
+            }
+            return res; 
+          })
+          .catch((err) => { 
+            if (shouldTrackRequest(url, method)) {
+              endLoad(); 
+            }
+            throw err; 
+          });
       };
     })();
   
     (function hookXHR() {
       const origOpen = XMLHttpRequest.prototype.open;
       const origSend = XMLHttpRequest.prototype.send;
-  
-      XMLHttpRequest.prototype.open = function (...args) {
-        this.__tmTracked = true; // mark
-        return origOpen.apply(this, args);
+
+      XMLHttpRequest.prototype.open = function (method, url, ...args) {
+        this.__tmMethod = method;
+        this.__tmUrl = url;
+        this.__tmShouldTrack = shouldTrackRequest(url, method);
+        return origOpen.apply(this, [method, url, ...args]);
       };
       XMLHttpRequest.prototype.send = function (...args) {
-        if (this.__tmTracked) {
+        if (this.__tmShouldTrack) {
           beginLoad();
           const onDone = () => { this.removeEventListener('loadend', onDone); endLoad(); };
           this.addEventListener('loadend', onDone);
