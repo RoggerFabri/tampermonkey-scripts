@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Loading Bar
 // @namespace    https://rogger-helper
-// @version      1.2.0
+// @version      1.3.0
 // @description  Shows a thin, minimal loading bar at the very top of every page; works with page loads, SPA navigations, fetch, and XHR.
 // @author       you
 // @match        *://*/*
@@ -29,7 +29,7 @@
   
     if (window.top !== window.self) {
       // Still show in iframes, but if you don’t want that, uncomment:
-      // return;
+      return;
     }
   
     // Avoid duplicates (e.g., hot reloads, CSP retries)
@@ -276,6 +276,9 @@
         /\/api\/v1\/me\/prefs/i, // Preference syncing
         /rdt\.gif/i,             // Reddit tracking pixel
         /\/api\/v1\/me\/karma/i, // Karma updates
+        /play\.google\.com\/log\b/i,   // Google logging endpoint
+        /youtubei\/v\d+\/log_event/i,  // YouTube logging (optional)
+        /client_streamz/i,             // misc Google metrics (optional)
       ];
 
       // Skip OPTIONS requests (preflight)
