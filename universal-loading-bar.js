@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Universal Loading Bar
-// @namespace    https://rogger-helper
+// @namespace    http://tampermonkey.net/
 // @version      1.3.0
 // @description  Shows a thin, minimal loading bar at the very top of every page; works with page loads, SPA navigations, fetch, and XHR.
-// @author       you
+// @author       Rogger Fabri
 // @match        *://*/*
 // @exclude      *://chrome.google.com/*
 // @run-at       document-start

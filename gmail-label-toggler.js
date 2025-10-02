@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.0
 // @description  Toggle visibility of emails by label in Gmail
-// @author       You
+// @author       Rogger Fabri
 // @match        https://mail.google.com/mail/*
 // @grant        GM_addStyle
 // @run-at       document-idle
