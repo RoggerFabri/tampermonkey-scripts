@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gmail A–Z Sorter
 // @namespace    http://tampermonkey.net/
-// @version      0.4.0
+// @version      0.7.1
 // @description  Sort the visible Gmail thread list alphabetically by Subject (A→Z or Z→A), ignoring emojis; includes Reset and Auto.
 // @author       Rogger Fabri
 // @match        https://mail.google.com/*
@@ -12,215 +12,220 @@
 (function () {
   'use strict';
 
-  // ------- Helpers -------
+  // ---------------- Utilities ----------------
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-  // Remove emojis & variation selectors; keep text
   function stripEmojis(str) {
     if (!str) return '';
-    // Common emoji ranges + VS16 + keycaps + flags
     return str
-      .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '')         // flags
-      .replace(/[\u{1F300}-\u{1FAFF}]/gu, '')         // symbols & pictographs
-      .replace(/[\u{1F900}-\u{1F9FF}]/gu, '')         // Supplemental Symbols & Pictographs
-      .replace(/[\u{2600}-\u{26FF}]/gu, '')           // Misc symbols
-      .replace(/[\u{2700}-\u{27BF}]/gu, '')           // Dingbats
-      .replace(/\uFE0F/gu, '')                        // Variation Selector-16
-      .replace(/[\u20E3]/gu, '')                      // keycap
+      .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '')
+      .replace(/[\u{1F300}-\u{1FAFF}]/gu, '')
+      .replace(/[\u{1F900}-\u{1F9FF}]/gu, '')
+      .replace(/[\u{2600}-\u{26FF}]/gu, '')
+      .replace(/[\u{2700}-\u{27BF}]/gu, '')
+      .replace(/\uFE0F/gu, '')
+      .replace(/[\u20E3]/gu, '')
       .trim();
   }
-
   function normalizeText(t) {
-    return stripEmojis(t)
-      .normalize('NFKD')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase();
+    return stripEmojis(t).normalize('NFKD').replace(/\s+/g, ' ').trim().toLowerCase();
   }
 
-  // Try several selectors for subject inside a row
   function subjectFromRow(row) {
-    // Gmail keeps a subject span with class 'bog' (legacy) inside '.y6'
-    // Newer UIs may restructure, so try a few.
     const candidates = [
-      '.y6 .bog',             // classic subject span
-      '.y6 span',             // fallback inside y6
-      '[data-legacy-thread-id] .y6 .bog', // thread list
-      'span[dir] .bog',
-      '.xS .bqe',             // promotions/social
-      '.xT .y6 span span',    // subject text
-      '.xT .y6'               // last resort
+      '.y6 .bog', '.y6 span', '[data-legacy-thread-id] .y6 .bog',
+      '.xS .bqe', '.xT .y6 span span', '.xT .y6'
     ];
     for (const sel of candidates) {
       const el = row.querySelector(sel);
       if (el && el.textContent) return el.textContent;
     }
-    // Absolute fallback: use the row's aria-label (often includes subject)
-    const ar = row.getAttribute('aria-label');
-    if (ar) return ar;
-    return '';
+    return row.getAttribute('aria-label') || '';
   }
 
-  // Locate the tbody that contains message rows
   function getListContainer() {
-    // Primary thread table
     const tbodies = document.querySelectorAll('div[role="main"] table[role="grid"] tbody');
-    for (const tb of tbodies) {
-      // Look for conversation rows inside
-      if (tb.querySelector('tr.zA,[role="row"]')) return tb;
-    }
-    // Legacy fallback
-    return document.querySelector('div[role="main"] .aeF .UI table tbody');
+    for (const tb of tbodies) if (tb.querySelector('tr.zA')) return tb;
+    return null;
   }
-
-  // Return the row elements we can sort
   function getRows() {
     const container = getListContainer();
     if (!container) return { container: null, rows: [] };
-    // Gmail marks conversations with tr.zA (read/unread variants)
-    // Avoid header rows like "Categories"
-    const rows = Array.from(container.querySelectorAll('tr.zA,[role="row"]'))
-      .filter(r => !r.querySelector('th') && r.offsetParent !== null);
+    const rows = Array.from(container.querySelectorAll('tr.zA')).filter(r => r.offsetParent !== null);
     return { container, rows };
   }
 
-  // ------- Toolbar -------
+  function userIndex() {
+    const m = location.pathname.match(/\/u\/(\d+)/);
+    return m ? m[1] : '0';
+  }
+
+  function firstAnchorHref(row) {
+    const a = row.querySelector('a[href*="#inbox/"], a[href*="#label/"], a[href*="#all/"]');
+    return a ? a.href : null;
+  }
+
+  function threadUrlFromRow(row) {
+    const withTid = row.hasAttribute('data-legacy-thread-id')
+      ? row
+      : (row.querySelector('[data-legacy-thread-id]') || row.closest('[data-legacy-thread-id]'));
+    if (withTid) {
+      const tid = withTid.getAttribute('data-legacy-thread-id');
+      if (tid) return `${location.origin}/mail/u/${userIndex()}/#inbox/${tid}`;
+    }
+    const href = firstAnchorHref(row);
+    if (href) return href;
+    return null;
+  }
+
+  // Elements where we should NOT intercept (checkboxes, stars, hover buttons, etc.)
+  function isControlTarget(t) {
+    if (!t) return false;
+    if (t.closest('div[role="checkbox"], .T-KT, .T-KT-JX, .afn')) return true;
+    // hover quick-action areas
+    if (t.closest('td.apU, td.xW, .bq4, .bqX, .ar, .asl')) return true;
+    if (t.closest('[role="button"], [data-tooltip], [aria-label]')) return true;
+    const al = (t.getAttribute('aria-label') || '').toLowerCase();
+    if (/(archive|delete|trash|remove|mark as read|mark as unread|snooze|move to|label|mute|report spam)/.test(al)) return true;
+    return false;
+  }
+
+  // ------------- Global capture nav override -------------
+  function handleNav(ev) {
+    const t = ev.target;
+    const row = t && t.closest && t.closest('tr.zA');
+    if (!row) return;
+
+    // Allow Gmail to handle quick action buttons & context menu
+    if (isControlTarget(t) || ev.button === 2) return;
+
+    const type = ev.type;
+    if (type === 'pointerdown' || type === 'mousedown' || type === 'mouseup') {
+      ev.stopImmediatePropagation();
+      return;
+    }
+
+    if (type === 'click' || type === 'auxclick' || (type === 'keydown' && (ev.key === 'Enter' || ev.keyCode === 13))) {
+      const url = threadUrlFromRow(row);
+      if (!url) return;
+      ev.stopImmediatePropagation();
+      ev.preventDefault();
+      const newTab = ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.type === 'auxclick' || ev.button === 1;
+      if (newTab) window.open(url, '_blank', 'noopener');
+      else location.assign(url);
+    }
+  }
+
+  ['pointerdown','mousedown','mouseup','click','auxclick','keydown']
+    .forEach(evt => document.addEventListener(evt, handleNav, true));
+
+  // ---------------- Toolbar (sorting) ----------------
   function ensureToolbar() {
     if (document.getElementById('gm-az-toolbar')) return;
-
     const host = document.createElement('div');
     host.id = 'gm-az-toolbar';
-    host.style.position = 'fixed';
-    host.style.zIndex = '999999';
-    host.style.bottom = '16px';
-    host.style.right = '16px';
-    host.style.background = 'rgba(32,33,36,0.92)';
-    host.style.color = '#fff';
-    host.style.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
-    host.style.borderRadius = '10px';
-    host.style.boxShadow = '0 6px 18px rgba(0,0,0,0.25)';
-    host.style.padding = '8px';
-    host.style.display = 'flex';
-    host.style.gap = '6px';
+    Object.assign(host.style, {
+      position: 'fixed',
+      bottom: '16px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      zIndex: 2147483647,
+      background: 'rgba(32,33,36,0.92)',
+      color: '#fff',
+      font: '12px system-ui, -apple-system, Segoe UI, Roboto, Arial',
+      borderRadius: '10px',
+      boxShadow: '0 6px 18px rgba(0,0,0,0.25)',
+      padding: '8px',
+      display: 'flex',
+      gap: '6px'
+    });
 
-    function mkBtn(label, title) {
+    function mkBtn(txt, title) {
       const b = document.createElement('button');
-      b.textContent = label;
-      b.title = title || '';
+      b.textContent = txt; b.title = title || '';
       Object.assign(b.style, {
-        background: 'transparent',
-        color: 'inherit',
+        background: 'transparent', color: 'inherit',
         border: '1px solid rgba(255,255,255,0.2)',
-        borderRadius: '8px',
-        padding: '6px 8px',
-        cursor: 'pointer'
+        borderRadius: '8px', padding: '6px 8px', cursor: 'pointer'
       });
       b.onmouseenter = () => b.style.background = 'rgba(255,255,255,0.06)';
       b.onmouseleave = () => b.style.background = 'transparent';
       return b;
     }
 
-    const btnAZ   = mkBtn('A→Z', 'Sort by Subject A→Z (ignore emojis)');
-    const btnZA   = mkBtn('Z→A', 'Sort by Subject Z→A (ignore emojis)');
-    const btnRst  = mkBtn('Reset', 'Restore original order');
-    const btnAuto = mkBtn('Auto', 'Auto-sort A→Z when list changes (toggle)');
-    btnAuto.dataset.active = '0';
+    const btnAZ = mkBtn('A→Z', 'Sort by Subject A→Z');
+    const btnZA = mkBtn('Z→A', 'Sort by Subject Z→A');
+    const btnR  = mkBtn('Reset', 'Restore order');
+    const btnAuto = mkBtn('Auto', 'Auto-sort A→Z on updates'); btnAuto.dataset.active = '0';
 
-    host.append(btnAZ, btnZA, btnRst, btnAuto);
+    host.append(btnAZ, btnZA, btnR, btnAuto);
     document.body.appendChild(host);
 
-    // Remember original order via data-index
-    function tagOriginalOrder(rows) {
-      rows.forEach((r, i) => {
-        if (!r.dataset._gmIndex) r.dataset._gmIndex = String(i);
-      });
-    }
+    function tagOriginal(rows){ rows.forEach((r,i)=>{ if (!r.dataset._gmIdx) r.dataset._gmIdx = String(i); }); }
 
-    function sortRows(dir = 'asc') {
+    function sort(dir='asc') {
       const { container, rows } = getRows();
-      if (!container || rows.length === 0) return;
-
-      tagOriginalOrder(rows);
-
-      const keyed = rows.map(r => {
-        const subj = subjectFromRow(r);
-        return {
-          key: normalizeText(subj),
-          el: r
-        };
-      });
-
-      keyed.sort((a, b) => {
-        const cmp = a.key.localeCompare(b.key, undefined, { sensitivity: 'base', numeric: true, ignorePunctuation: true });
-        return dir === 'asc' ? cmp : -cmp;
-      });
-
+      if (!container || !rows.length) return;
+      tagOriginal(rows);
+      const keyed = rows.map(r => ({ key: normalizeText(subjectFromRow(r)), el: r }));
+      keyed.sort((a,b) => dir==='asc'
+        ? a.key.localeCompare(b.key, undefined, { sensitivity:'base', numeric:true, ignorePunctuation:true })
+        : b.key.localeCompare(a.key, undefined, { sensitivity:'base', numeric:true, ignorePunctuation:true })
+      );
       const frag = document.createDocumentFragment();
       keyed.forEach(k => frag.appendChild(k.el));
       container.appendChild(frag);
     }
 
-    function resetRows() {
+    function reset() {
       const { container, rows } = getRows();
-      if (!container || rows.length === 0) return;
-      const sorted = [...rows].sort((a, b) => {
-        const ai = Number(a.dataset._gmIndex ?? Number.MAX_SAFE_INTEGER);
-        const bi = Number(b.dataset._gmIndex ?? Number.MAX_SAFE_INTEGER);
-        return ai - bi;
-      });
+      if (!container || !rows.length) return;
+      const sorted = [...rows].sort((a,b) => (+a.dataset._gmIdx) - (+b.dataset._gmIdx));
       const frag = document.createDocumentFragment();
       sorted.forEach(r => frag.appendChild(r));
       container.appendChild(frag);
     }
 
-    btnAZ.addEventListener('click', () => sortRows('asc'));
-    btnZA.addEventListener('click', () => sortRows('desc'));
-    btnRst.addEventListener('click', resetRows);
+    btnAZ.onclick = () => sort('asc');
+    btnZA.onclick = () => sort('desc');
+    btnR.onclick  = reset;
+    btnAuto.onclick = () => {
+      const on = btnAuto.dataset.active === '1';
+      btnAuto.dataset.active = on ? '0' : '1';
+      btnAuto.style.borderColor = on ? 'rgba(255,255,255,0.2)' : '#7aa2ff';
+      btnAuto.style.boxShadow = on ? 'none' : '0 0 0 1px #7aa2ff inset';
+    };
 
-    btnAuto.addEventListener('click', () => {
-      const active = btnAuto.dataset.active === '1';
-      btnAuto.dataset.active = active ? '0' : '1';
-      btnAuto.style.borderColor = active ? 'rgba(255,255,255,0.2)' : '#7aa2ff';
-      btnAuto.style.boxShadow = active ? 'none' : '0 0 0 1px #7aa2ff inset';
-    });
-
-    // Mutation observer: when list updates, optionally auto sort
-    const observer = new MutationObserver(() => {
+    const obs = new MutationObserver(() => {
       if (btnAuto.dataset.active === '1') {
-        // Debounce a bit to let Gmail finish rendering
-        clearTimeout(observer._t);
-        observer._t = setTimeout(() => sortRows('asc'), 250);
+        clearTimeout(obs._t); obs._t = setTimeout(() => sort('asc'), 250);
       }
     });
-
     (async function watch() {
       while (true) {
-        const container = getListContainer();
-        if (container && observer._container !== container) {
-          if (observer._container) observer.disconnect();
-          observer.observe(container, { childList: true, subtree: true });
-          observer._container = container;
+        const c = getListContainer();
+        if (c && obs._c !== c) {
+          if (obs._c) obs.disconnect();
+          obs.observe(c, { childList: true, subtree: true });
+          obs._c = c;
         }
         await sleep(800);
       }
     })();
   }
 
-  // ------- Boot -------
+  // ---------------- Boot ----------------
   async function boot() {
-    // Wait until Gmail main pane exists
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 80; i++) {
       if (document.querySelector('div[role="main"]')) break;
-      await sleep(500);
+      await sleep(250);
     }
     ensureToolbar();
   }
 
-  // Re-boot on navigation (Gmail is an SPA)
-  const navObs = new MutationObserver(() => {
+  new MutationObserver(() => {
     if (!document.getElementById('gm-az-toolbar')) ensureToolbar();
-  });
-  navObs.observe(document.documentElement, { childList: true, subtree: true });
+  }).observe(document.documentElement, { childList: true, subtree: true });
 
   boot();
 })();
