@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gmail A–Z Sorter
 // @namespace    http://tampermonkey.net/
-// @version      0.8.2
+// @version      0.8.3
 // @description  Sort the visible Gmail thread list alphabetically by Subject (A→Z or Z→A), ignoring emojis; includes Reset and Auto.
 // @author       Rogger Fabri
 // @match        https://mail.google.com/*
@@ -232,11 +232,18 @@
       btnAuto.style.boxShadow = on ? 'none' : '0 0 0 1px #7aa2ff inset';
     };
 
-    // Debounced auto-sort observer with longer delay
+    // Auto-sort observer with increased debounce to prevent flipping
+    let mutationCount = 0;
     const obs = new MutationObserver(() => {
       if (btnAuto.dataset.active === '1') {
-        clearTimeout(obs._t); 
-        obs._t = setTimeout(() => sort('asc'), 500); // Increased from 250ms
+        mutationCount++;
+        clearTimeout(obs._t);
+        // Wait longer if we're seeing rapid mutations (Gmail is still updating)
+        const delay = mutationCount > 3 ? 1200 : 800;
+        obs._t = setTimeout(() => {
+          sort('asc');
+          mutationCount = 0; // Reset counter after sort
+        }, delay);
       }
     });
     
@@ -246,6 +253,7 @@
         // Check if container changed OR if current observed container is no longer in DOM
         if (c && (obs._c !== c || (obs._c && !document.contains(obs._c)))) {
           if (obs._c) obs.disconnect();
+          mutationCount = 0; // Reset counter on container change
           // Watch subtree to catch Gmail's dynamic updates
           obs.observe(c, { childList: true, subtree: true });
           obs._c = c;
