@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gmail A–Z Sorter
 // @namespace    http://tampermonkey.net/
-// @version      0.7.1
+// @version      0.8.2
 // @description  Sort the visible Gmail thread list alphabetically by Subject (A→Z or Z→A), ignoring emojis; includes Reset and Auto.
 // @author       Rogger Fabri
 // @match        https://mail.google.com/*
@@ -15,39 +15,59 @@
   // ---------------- Utilities ----------------
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+  // Compile regexes once for performance
+  const emojiRegexes = [
+    /[\u{1F1E6}-\u{1F1FF}]/gu,
+    /[\u{1F300}-\u{1FAFF}]/gu,
+    /[\u{1F900}-\u{1F9FF}]/gu,
+    /[\u{2600}-\u{26FF}]/gu,
+    /[\u{2700}-\u{27BF}]/gu,
+    /\uFE0F/gu,
+    /[\u20E3]/gu
+  ];
+  const whitespaceRegex = /\s+/g;
+
   function stripEmojis(str) {
     if (!str) return '';
-    return str
-      .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '')
-      .replace(/[\u{1F300}-\u{1FAFF}]/gu, '')
-      .replace(/[\u{1F900}-\u{1F9FF}]/gu, '')
-      .replace(/[\u{2600}-\u{26FF}]/gu, '')
-      .replace(/[\u{2700}-\u{27BF}]/gu, '')
-      .replace(/\uFE0F/gu, '')
-      .replace(/[\u20E3]/gu, '')
-      .trim();
+    let result = str;
+    for (const regex of emojiRegexes) {
+      result = result.replace(regex, '');
+    }
+    return result.trim();
   }
+  
   function normalizeText(t) {
-    return stripEmojis(t).normalize('NFKD').replace(/\s+/g, ' ').trim().toLowerCase();
+    return stripEmojis(t).normalize('NFKD').replace(whitespaceRegex, ' ').trim().toLowerCase();
   }
 
+  // Cache subject extraction with optimized selector
+  const subjectSelectors = '.y6 .bog, .y6 span, [data-legacy-thread-id] .y6 .bog, .xS .bqe, .xT .y6 span span, .xT .y6';
+  
   function subjectFromRow(row) {
-    const candidates = [
-      '.y6 .bog', '.y6 span', '[data-legacy-thread-id] .y6 .bog',
-      '.xS .bqe', '.xT .y6 span span', '.xT .y6'
-    ];
-    for (const sel of candidates) {
-      const el = row.querySelector(sel);
-      if (el && el.textContent) return el.textContent;
-    }
+    const el = row.querySelector(subjectSelectors);
+    if (el?.textContent) return el.textContent;
     return row.getAttribute('aria-label') || '';
   }
 
+  // Cache container briefly to avoid repeated queries, with validation
+  let containerCache = { el: null, time: 0 };
   function getListContainer() {
+    const now = Date.now();
+    // Validate cached container is still in DOM
+    if (containerCache.el && now - containerCache.time < 1000 && document.contains(containerCache.el)) {
+      return containerCache.el;
+    }
     const tbodies = document.querySelectorAll('div[role="main"] table[role="grid"] tbody');
-    for (const tb of tbodies) if (tb.querySelector('tr.zA')) return tb;
+    for (const tb of tbodies) {
+      if (tb.querySelector('tr.zA')) {
+        containerCache = { el: tb, time: now };
+        return tb;
+      }
+    }
+    containerCache = { el: null, time: now };
     return null;
   }
+  
   function getRows() {
     const container = getListContainer();
     if (!container) return { container: null, rows: [] };
@@ -55,9 +75,14 @@
     return { container, rows };
   }
 
+  // Cache user index since it rarely changes
+  let cachedUserIndex = null;
   function userIndex() {
-    const m = location.pathname.match(/\/u\/(\d+)/);
-    return m ? m[1] : '0';
+    if (cachedUserIndex === null) {
+      const m = location.pathname.match(/\/u\/(\d+)/);
+      cachedUserIndex = m ? m[1] : '0';
+    }
+    return cachedUserIndex;
   }
 
   function firstAnchorHref(row) {
@@ -79,14 +104,18 @@
   }
 
   // Elements where we should NOT intercept (checkboxes, stars, hover buttons, etc.)
+  // Cache control selectors
+  const controlSelectors = 'div[role="checkbox"], .T-KT, .T-KT-JX, .afn, td.apU, td.xW, .bq4, .bqX, .ar, .asl, [role="button"], [data-tooltip]';
+  const controlAriaRegex = /(archive|delete|trash|remove|mark as read|mark as unread|snooze|move to|label|mute|report spam)/;
+  
   function isControlTarget(t) {
     if (!t) return false;
-    if (t.closest('div[role="checkbox"], .T-KT, .T-KT-JX, .afn')) return true;
-    // hover quick-action areas
-    if (t.closest('td.apU, td.xW, .bq4, .bqX, .ar, .asl')) return true;
-    if (t.closest('[role="button"], [data-tooltip], [aria-label]')) return true;
-    const al = (t.getAttribute('aria-label') || '').toLowerCase();
-    if (/(archive|delete|trash|remove|mark as read|mark as unread|snooze|move to|label|mute|report spam)/.test(al)) return true;
+    if (t.closest(controlSelectors)) return true;
+    // Only check aria-label if element has one
+    if (t.hasAttribute('aria-label')) {
+      const al = t.getAttribute('aria-label').toLowerCase();
+      if (controlAriaRegex.test(al)) return true;
+    }
     return false;
   }
 
@@ -161,16 +190,23 @@
     host.append(btnAZ, btnZA, btnR, btnAuto);
     document.body.appendChild(host);
 
-    function tagOriginal(rows){ rows.forEach((r,i)=>{ if (!r.dataset._gmIdx) r.dataset._gmIdx = String(i); }); }
+    // Cache localeCompare options for performance
+    const compareOpts = { sensitivity: 'base', numeric: true, ignorePunctuation: true };
+
+    function tagOriginal(container, rows){ 
+      // Clear old indices first to prevent unbounded growth
+      container.querySelectorAll('[data-_gm-idx]').forEach(r => delete r.dataset._gmIdx);
+      rows.forEach((r,i)=> r.dataset._gmIdx = String(i)); 
+    }
 
     function sort(dir='asc') {
       const { container, rows } = getRows();
       if (!container || !rows.length) return;
-      tagOriginal(rows);
+      tagOriginal(container, rows);
       const keyed = rows.map(r => ({ key: normalizeText(subjectFromRow(r)), el: r }));
       keyed.sort((a,b) => dir==='asc'
-        ? a.key.localeCompare(b.key, undefined, { sensitivity:'base', numeric:true, ignorePunctuation:true })
-        : b.key.localeCompare(a.key, undefined, { sensitivity:'base', numeric:true, ignorePunctuation:true })
+        ? a.key.localeCompare(b.key, undefined, compareOpts)
+        : b.key.localeCompare(a.key, undefined, compareOpts)
       );
       const frag = document.createDocumentFragment();
       keyed.forEach(k => frag.appendChild(k.el));
@@ -196,20 +232,26 @@
       btnAuto.style.boxShadow = on ? 'none' : '0 0 0 1px #7aa2ff inset';
     };
 
+    // Debounced auto-sort observer with longer delay
     const obs = new MutationObserver(() => {
       if (btnAuto.dataset.active === '1') {
-        clearTimeout(obs._t); obs._t = setTimeout(() => sort('asc'), 250);
+        clearTimeout(obs._t); 
+        obs._t = setTimeout(() => sort('asc'), 500); // Increased from 250ms
       }
     });
+    
     (async function watch() {
       while (true) {
         const c = getListContainer();
-        if (c && obs._c !== c) {
+        // Check if container changed OR if current observed container is no longer in DOM
+        if (c && (obs._c !== c || (obs._c && !document.contains(obs._c)))) {
           if (obs._c) obs.disconnect();
+          // Watch subtree to catch Gmail's dynamic updates
           obs.observe(c, { childList: true, subtree: true });
           obs._c = c;
         }
-        await sleep(800);
+        // Check more frequently to catch container changes quickly
+        await sleep(1000);
       }
     })();
   }
@@ -221,11 +263,15 @@
       await sleep(250);
     }
     ensureToolbar();
+    
+    // Monitor for toolbar removal with a more specific observer
+    const gmailMain = document.querySelector('div[role="main"]');
+    if (gmailMain) {
+      new MutationObserver(() => {
+        if (!document.getElementById('gm-az-toolbar')) ensureToolbar();
+      }).observe(gmailMain.parentElement || document.body, { childList: true, subtree: false });
+    }
   }
-
-  new MutationObserver(() => {
-    if (!document.getElementById('gm-az-toolbar')) ensureToolbar();
-  }).observe(document.documentElement, { childList: true, subtree: true });
 
   boot();
 })();
