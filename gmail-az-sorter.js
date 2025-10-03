@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gmail A–Z Sorter
 // @namespace    http://tampermonkey.net/
-// @version      0.8.4
+// @version      0.9.1
 // @description  Sort the visible Gmail thread list alphabetically by Subject (A→Z or Z→A), ignoring emojis; includes Reset and Auto.
 // @author       Rogger Fabri
 // @match        https://mail.google.com/*
@@ -182,27 +182,54 @@
       return b;
     }
 
-    const btnAZ = mkBtn('A→Z', 'Sort by Subject A→Z');
-    const btnZA = mkBtn('Z→A', 'Sort by Subject Z→A');
-    const btnR  = mkBtn('Reset', 'Restore order');
-    const btnAuto = mkBtn('Auto', 'Auto-sort A→Z on updates'); btnAuto.dataset.active = '0';
+    const btnAZ = mkBtn('A→Z', 'Click to toggle auto-sort A→Z');
+    const btnZA = mkBtn('Z→A', 'Click to toggle auto-sort Z→A');
+    const btnR  = mkBtn('Reset', 'Restore original order');
 
-    host.append(btnAZ, btnZA, btnR, btnAuto);
+    host.append(btnAZ, btnZA, btnR);
     document.body.appendChild(host);
 
     // Cache localeCompare options for performance
     const compareOpts = { sensitivity: 'base', numeric: true, ignorePunctuation: true };
+    
+    // Track active mode: null, 'asc', or 'desc'
+    let activeMode = null;
+    // Flag to prevent observer from reacting to reset operations
+    let isResetting = false;
 
-    function tagOriginal(container, rows){ 
-      // Clear old indices first to prevent unbounded growth
-      container.querySelectorAll('[data-_gm-idx]').forEach(r => delete r.dataset._gmIdx);
-      rows.forEach((r,i)=> r.dataset._gmIdx = String(i)); 
+    function tagOriginalIfNeeded(rows){ 
+      // Only tag rows that don't already have an index
+      rows.forEach(r => {
+        if (!r.dataset._gmIdx) {
+          const { rows: currentRows } = getRows();
+          const idx = currentRows.indexOf(r);
+          if (idx >= 0) r.dataset._gmIdx = String(idx);
+        }
+      });
+    }
+
+    function updateButtonStyles() {
+      // Reset all buttons
+      btnAZ.style.borderColor = 'rgba(255,255,255,0.2)';
+      btnAZ.style.boxShadow = 'none';
+      btnZA.style.borderColor = 'rgba(255,255,255,0.2)';
+      btnZA.style.boxShadow = 'none';
+      
+      // Highlight active button
+      if (activeMode === 'asc') {
+        btnAZ.style.borderColor = '#7aa2ff';
+        btnAZ.style.boxShadow = '0 0 0 1px #7aa2ff inset';
+      } else if (activeMode === 'desc') {
+        btnZA.style.borderColor = '#7aa2ff';
+        btnZA.style.boxShadow = '0 0 0 1px #7aa2ff inset';
+      }
     }
 
     function sort(dir='asc') {
       const { container, rows } = getRows();
       if (!container || !rows.length) return;
-      tagOriginal(container, rows);
+      // Tag original indices before first sort
+      tagOriginalIfNeeded(rows);
       const keyed = rows.map(r => ({ key: normalizeText(subjectFromRow(r)), el: r }));
       keyed.sort((a,b) => dir==='asc'
         ? a.key.localeCompare(b.key, undefined, compareOpts)
@@ -216,45 +243,137 @@
     function reset() {
       const { container, rows } = getRows();
       if (!container || !rows.length) return;
-      const sorted = [...rows].sort((a,b) => (+a.dataset._gmIdx) - (+b.dataset._gmIdx));
+      
+      // Filter rows that have original indices and sort by them
+      const withIdx = rows.filter(r => r.dataset._gmIdx !== undefined);
+      if (withIdx.length === 0) {
+        // No indices stored, nothing to reset
+        console.log('No original order stored. Sort first, then reset.');
+        return;
+      }
+      
+      // Set flags to prevent observer from reacting
+      isResetting = true;
+      activeMode = null;
+      clearTimeout(obs._t);
+      mutationCount = 0;
+      
+      // Update UI immediately
+      updateButtonStyles();
+      
+      // Perform reset
+      const sorted = [...withIdx].sort((a,b) => (+a.dataset._gmIdx) - (+b.dataset._gmIdx));
       const frag = document.createDocumentFragment();
       sorted.forEach(r => frag.appendChild(r));
       container.appendChild(frag);
+      
+      // Clear the flag after a short delay to allow DOM to settle
+      setTimeout(() => {
+        isResetting = false;
+      }, 100);
     }
 
-    btnAZ.onclick = () => sort('asc');
-    btnZA.onclick = () => sort('desc');
-    btnR.onclick  = reset;
-    btnAuto.onclick = () => {
-      const on = btnAuto.dataset.active === '1';
-      btnAuto.dataset.active = on ? '0' : '1';
-      btnAuto.style.borderColor = on ? 'rgba(255,255,255,0.2)' : '#7aa2ff';
-      btnAuto.style.boxShadow = on ? 'none' : '0 0 0 1px #7aa2ff inset';
-      // Reset mutation count when toggling auto mode
+    btnAZ.onclick = () => {
+      if (activeMode === 'asc') {
+        // Toggle off
+        activeMode = null;
+      } else {
+        // Toggle on
+        activeMode = 'asc';
+        sort('asc');
+      }
+      updateButtonStyles();
       mutationCount = 0;
       clearTimeout(obs._t);
     };
+    
+    btnZA.onclick = () => {
+      if (activeMode === 'desc') {
+        // Toggle off
+        activeMode = null;
+      } else {
+        // Toggle on
+        activeMode = 'desc';
+        sort('desc');
+      }
+      updateButtonStyles();
+      mutationCount = 0;
+      clearTimeout(obs._t);
+    };
+    
+    btnR.onclick = reset;
 
     // Auto-sort observer with increased debounce to prevent flipping
     let mutationCount = 0;
     let lastMutationTime = 0;
+    let lastSortTime = 0;
     const obs = new MutationObserver(() => {
-      if (btnAuto.dataset.active === '1') {
-        const now = Date.now();
-        // Reset count if more than 3 seconds passed since last mutation
-        if (now - lastMutationTime > 3000) {
-          mutationCount = 0;
-        }
-        lastMutationTime = now;
-        mutationCount++;
-        clearTimeout(obs._t);
-        // Cap the mutation count to prevent unbounded delay growth
-        const effectiveCount = Math.min(mutationCount, 5);
-        const delay = effectiveCount > 3 ? 1200 : 800;
-        obs._t = setTimeout(() => {
-          sort('asc');
+      // Ignore mutations during reset or when no active mode
+      if (isResetting || !activeMode) return;
+      
+      const now = Date.now();
+      // Reset count if more than 3 seconds passed since last mutation
+      if (now - lastMutationTime > 3000) {
+        mutationCount = 0;
+      }
+      lastMutationTime = now;
+      mutationCount++;
+      clearTimeout(obs._t);
+      // Cap the mutation count to prevent unbounded delay growth
+      const effectiveCount = Math.min(mutationCount, 5);
+      const delay = effectiveCount > 3 ? 1200 : 800;
+      obs._t = setTimeout(() => {
+        if (!isResetting && activeMode) {
+          sort(activeMode);
+          lastSortTime = Date.now();
           mutationCount = 0; // Reset counter after sort
-        }, delay);
+        }
+      }, delay);
+    });
+    
+    // Periodic check to ensure auto-sort keeps working after long inactivity
+    setInterval(() => {
+      if (activeMode && !isResetting) {
+        const now = Date.now();
+        const { rows } = getRows();
+        // If we have rows and haven't sorted in the last 5 seconds, check if sort is needed
+        if (rows.length > 0 && now - lastSortTime > 5000) {
+          // Check if rows are actually out of order
+          const keys = rows.map(r => normalizeText(subjectFromRow(r)));
+          const needsSort = keys.some((key, i) => {
+            if (i === 0) return false;
+            return activeMode === 'asc' 
+              ? key.localeCompare(keys[i-1], undefined, compareOpts) < 0
+              : key.localeCompare(keys[i-1], undefined, compareOpts) > 0;
+          });
+          if (needsSort) {
+            sort(activeMode);
+            lastSortTime = now;
+          }
+        }
+      }
+    }, 3000);
+    
+    // Handle visibility change (when tab becomes visible again)
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && activeMode && !isResetting) {
+        // Small delay to let Gmail settle, then re-sort if needed
+        setTimeout(() => {
+          const { rows } = getRows();
+          if (rows.length > 0) {
+            const keys = rows.map(r => normalizeText(subjectFromRow(r)));
+            const needsSort = keys.some((key, i) => {
+              if (i === 0) return false;
+              return activeMode === 'asc' 
+                ? key.localeCompare(keys[i-1], undefined, compareOpts) < 0
+                : key.localeCompare(keys[i-1], undefined, compareOpts) > 0;
+            });
+            if (needsSort) {
+              sort(activeMode);
+              lastSortTime = Date.now();
+            }
+          }
+        }, 1000);
       }
     });
     
@@ -268,6 +387,13 @@
           // Watch subtree to catch Gmail's dynamic updates
           obs.observe(c, { childList: true, subtree: true });
           obs._c = c;
+          // Sort immediately when reconnecting to a new/changed container
+          if (activeMode && !isResetting) {
+            setTimeout(() => {
+              sort(activeMode);
+              lastSortTime = Date.now();
+            }, 500);
+          }
         }
         // Check more frequently to catch container changes quickly
         await sleep(1000);
