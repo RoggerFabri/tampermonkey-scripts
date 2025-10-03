@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gmail Label Toggle
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Toggle visibility of emails by label in Gmail
 // @author       Rogger Fabri
 // @match        https://mail.google.com/mail/*
@@ -36,6 +36,19 @@
 
     // Store hidden labels
     const hiddenLabels = new Set();
+
+    // Debounce helper for performance optimization
+    function debounce(func, wait) {
+        let timeout;
+        return function executedFunction(...args) {
+            const later = () => {
+                clearTimeout(timeout);
+                func(...args);
+            };
+            clearTimeout(timeout);
+            timeout = setTimeout(later, wait);
+        };
+    }
 
     // Function to add toggle buttons to labels
     function addToggleButtons() {
@@ -91,6 +104,15 @@
 
     // Apply visibility to emails based on current hidden labels
     function updateEmailVisibility() {
+        // Early exit if no labels are hidden
+        if (hiddenLabels.size === 0) {
+            // Remove all hidden classes if no labels are hidden
+            document.querySelectorAll('tr.zA.label-toggle-hidden').forEach(row => {
+                row.classList.remove('label-toggle-hidden');
+            });
+            return;
+        }
+
         // Target all email rows in the inbox
         const emailRows = document.querySelectorAll('tr.zA');
 
@@ -99,13 +121,14 @@
             const labelElements = row.querySelectorAll('.ar.as .at');
             let shouldHide = false;
 
-            // Check if the row has any hidden labels
-            labelElements.forEach(label => {
+            // Check if the row has any hidden labels (with early exit)
+            for (const label of labelElements) {
                 const labelTitle = label.getAttribute('title') || '';
                 if (hiddenLabels.has(labelTitle)) {
                     shouldHide = true;
+                    break; // Early exit once we find a hidden label
                 }
-            });
+            }
 
             // Apply visibility
             if (shouldHide) {
@@ -124,9 +147,13 @@
             subtree: true
         };
 
+        // Debounced versions of the functions for better performance
+        const debouncedAddToggleButtons = debounce(addToggleButtons, 300);
+        const debouncedUpdateEmailVisibility = debounce(updateEmailVisibility, 150);
+
         // Observer for label sidebar updates
         const sidebarObserver = new MutationObserver(mutations => {
-            addToggleButtons();
+            debouncedAddToggleButtons();
         });
 
         // Start observing the sidebar for label changes
@@ -137,7 +164,10 @@
 
         // Observer for inbox content updates
         const inboxObserver = new MutationObserver(mutations => {
-            updateEmailVisibility();
+            // Only update if we have hidden labels
+            if (hiddenLabels.size > 0) {
+                debouncedUpdateEmailVisibility();
+            }
         });
 
         // Start observing the inbox for email changes
@@ -156,7 +186,7 @@
         setTimeout(initObserver, 1000);
 
         // Check periodically for new labels that might not trigger the observer
-        setInterval(addToggleButtons, 3000);
+        setInterval(addToggleButtons, 5000);
     }
 
     // Wait for Gmail to fully load

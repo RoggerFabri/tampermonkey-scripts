@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gmail A–Z Sorter
 // @namespace    http://tampermonkey.net/
-// @version      0.8.3
+// @version      0.8.4
 // @description  Sort the visible Gmail thread list alphabetically by Subject (A→Z or Z→A), ignoring emojis; includes Reset and Auto.
 // @author       Rogger Fabri
 // @match        https://mail.google.com/*
@@ -230,16 +230,27 @@
       btnAuto.dataset.active = on ? '0' : '1';
       btnAuto.style.borderColor = on ? 'rgba(255,255,255,0.2)' : '#7aa2ff';
       btnAuto.style.boxShadow = on ? 'none' : '0 0 0 1px #7aa2ff inset';
+      // Reset mutation count when toggling auto mode
+      mutationCount = 0;
+      clearTimeout(obs._t);
     };
 
     // Auto-sort observer with increased debounce to prevent flipping
     let mutationCount = 0;
+    let lastMutationTime = 0;
     const obs = new MutationObserver(() => {
       if (btnAuto.dataset.active === '1') {
+        const now = Date.now();
+        // Reset count if more than 3 seconds passed since last mutation
+        if (now - lastMutationTime > 3000) {
+          mutationCount = 0;
+        }
+        lastMutationTime = now;
         mutationCount++;
         clearTimeout(obs._t);
-        // Wait longer if we're seeing rapid mutations (Gmail is still updating)
-        const delay = mutationCount > 3 ? 1200 : 800;
+        // Cap the mutation count to prevent unbounded delay growth
+        const effectiveCount = Math.min(mutationCount, 5);
+        const delay = effectiveCount > 3 ? 1200 : 800;
         obs._t = setTimeout(() => {
           sort('asc');
           mutationCount = 0; // Reset counter after sort

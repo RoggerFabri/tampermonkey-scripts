@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Loading Bar
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
+// @version      1.4.0
 // @description  Shows a thin, minimal loading bar at the very top of every page; works with page loads, SPA navigations, fetch, and XHR.
 // @author       Rogger Fabri
 // @match        *://*/*
@@ -14,7 +14,7 @@
     'use strict';
   
     // ---- Config (tweak to taste) ----
-    const BAR_HEIGHT_PX = 3;
+    const BAR_HEIGHT_PX = 2;
     const BAR_COLOR = '#29d';      // any CSS color
     const BAR_BG = 'transparent';  // background behind the progress line
     const Z_INDEX = 2147483647;    // top-most
@@ -134,6 +134,8 @@
         const idle = now - state.lastActivity;
         const totalTime = now - state.startTime;
         const docComplete = document.readyState === 'complete';
+        const hasNoActiveLoads = state.activeLoads === 0;
+        const currentProgress = state.progress;
         
         // Force finish if we've been loading too long
         if (totalTime > MAX_LOADING_MS) {
@@ -144,11 +146,11 @@
         // More aggressive completion for SPAs
         const shouldFinish = (
           // Standard conditions
-          (idle > MAX_IDLE_MS && state.activeLoads === 0 && docComplete) ||
+          (idle > MAX_IDLE_MS && hasNoActiveLoads && docComplete) ||
           // SPA-friendly conditions: if doc is complete and we're idle for shorter time
-          (docComplete && state.activeLoads === 0 && idle > 200 && totalTime > 1000) ||
+          (docComplete && hasNoActiveLoads && idle > 200 && totalTime > 1000) ||
           // Emergency finish: if we're near the end and have been idle
-          (state.progress > 0.9 && idle > 300 && state.activeLoads === 0)
+          (currentProgress > 0.9 && idle > 300 && hasNoActiveLoads)
         );
         
         if (shouldFinish) {
@@ -157,9 +159,9 @@
         }
         
         // If still loading, trickle toward TRICKLE_TO, but speed up near the end
-        if (state.progress < TRICKLE_TO) {
+        if (currentProgress < TRICKLE_TO) {
           const speedMultiplier = totalTime > 2000 ? 2 : 1; // Speed up after 2s
-          setProgress(Math.min(TRICKLE_TO, state.progress + (TRICKLE_RATE * speedMultiplier) * (1 - state.progress)));
+          setProgress(Math.min(TRICKLE_TO, currentProgress + (TRICKLE_RATE * speedMultiplier) * (1 - currentProgress)));
         }
 
         state.timer = setTimeout(tick, TICK_MS);
@@ -238,57 +240,59 @@
     })();
   
     // ---- Request filtering for better UX ----
-    function shouldTrackRequest(url, method = 'GET') {
-      // Skip common background/analytics requests
-      const skipPatterns = [
-        /analytics/i,
-        /tracking/i,
-        /telemetry/i,
-        /metrics/i,
-        /beacon/i,
-        /pixel/i,
-        /ads?[\/\?]/i,
-        /doubleclick/i,
-        /googletagmanager/i,
-        /facebook\.com\/tr/i,
-        /google-analytics/i,
-        /gtag/i,
-        /hotjar/i,
-        /mixpanel/i,
-        /amplitude/i,
-        // GraphQL and API patterns
-        /\/graphql\b/i,          // GraphQL endpoints
-        /\/api\/graphql/i,       // Common GraphQL API paths
-        /\/gql\b/i,              // Short GraphQL endpoints
-        /query.*graphql/i,       // GraphQL in query params
-        // Media streaming (HLS, DASH, etc.)
-        /\.m3u8$/i,              // HLS playlist files
-        /\.ts$/i,                // HLS video segments
-        /\.aac$/i,               // HLS audio segments
-        /HLS_.*\.(ts|aac|mp4)$/i, // HLS segments with naming pattern
-        /DASH_.*\.mp4$/i,        // DASH video segments
-        /chunk_\d+\.(ts|mp4)$/i, // Generic streaming chunks
-        /segment_\d+\.(ts|mp4)$/i, // Generic streaming segments
-        // Reddit-specific patterns
-        /\/api\/v1\/sendbird/i,  // Reddit chat
-        /\/api\/v1\/gold/i,      // Reddit premium checks
-        /\/svc\/shreddit/i,      // Reddit telemetry
-        /\/api\/v1\/me\/prefs/i, // Preference syncing
-        /rdt\.gif/i,             // Reddit tracking pixel
-        /\/api\/v1\/me\/karma/i, // Karma updates
-        /play\.google\.com\/log\b/i,   // Google logging endpoint
-        /youtubei\/v\d+\/log_event/i,  // YouTube logging (optional)
-        /client_streamz/i,             // misc Google metrics (optional)
-      ];
+    // Pre-compile regex patterns for better performance
+    const SKIP_PATTERNS = [
+      /analytics/i,
+      /tracking/i,
+      /telemetry/i,
+      /metrics/i,
+      /beacon/i,
+      /pixel/i,
+      /ads?[\/\?]/i,
+      /doubleclick/i,
+      /googletagmanager/i,
+      /facebook\.com\/tr/i,
+      /google-analytics/i,
+      /gtag/i,
+      /hotjar/i,
+      /mixpanel/i,
+      /amplitude/i,
+      // GraphQL and API patterns
+      /\/graphql\b/i,          // GraphQL endpoints
+      /\/api\/graphql/i,       // Common GraphQL API paths
+      /\/gql\b/i,              // Short GraphQL endpoints
+      /query.*graphql/i,       // GraphQL in query params
+      // Media streaming (HLS, DASH, etc.)
+      /\.m3u8$/i,              // HLS playlist files
+      /\.ts$/i,                // HLS video segments
+      /\.aac$/i,               // HLS audio segments
+      /HLS_.*\.(ts|aac|mp4)$/i, // HLS segments with naming pattern
+      /DASH_.*\.mp4$/i,        // DASH video segments
+      /chunk_\d+\.(ts|mp4)$/i, // Generic streaming chunks
+      /segment_\d+\.(ts|mp4)$/i, // Generic streaming segments
+      // Reddit-specific patterns
+      /\/api\/v1\/sendbird/i,  // Reddit chat
+      /\/api\/v1\/gold/i,      // Reddit premium checks
+      /\/svc\/shreddit/i,      // Reddit telemetry
+      /\/api\/v1\/me\/prefs/i, // Preference syncing
+      /rdt\.gif/i,             // Reddit tracking pixel
+      /\/api\/v1\/me\/karma/i, // Karma updates
+      /play\.google\.com\/log\b/i,   // Google logging endpoint
+      /youtubei\/v\d+\/log_event/i,  // YouTube logging (optional)
+      /client_streamz/i,             // misc Google metrics (optional)
+    ];
 
-      // Skip OPTIONS requests (preflight)
+    function shouldTrackRequest(url, method = 'GET') {
+      // Quick checks first (fastest operations)
       if (method === 'OPTIONS') return false;
-      
-      // Skip data URLs and blob URLs
       if (url.startsWith('data:') || url.startsWith('blob:')) return false;
       
-      // Check against skip patterns
-      return !skipPatterns.some(pattern => pattern.test(url));
+      // Check against skip patterns with early exit
+      for (let i = 0; i < SKIP_PATTERNS.length; i++) {
+        if (SKIP_PATTERNS[i].test(url)) return false;
+      }
+      
+      return true;
     }
 
     // ---- Hook fetch/XHR to reflect network activity ----
@@ -296,23 +300,26 @@
       if (!window.fetch) return;
       const _fetch = window.fetch.bind(window);
       window.fetch = function (...args) {
-        const url = args[0]?.toString() || '';
+        const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || args[0]?.toString() || '');
         const options = args[1] || {};
         const method = options.method || 'GET';
         
-        if (shouldTrackRequest(url, method)) {
+        // Cache the tracking decision to avoid redundant regex checks
+        const shouldTrack = shouldTrackRequest(url, method);
+        
+        if (shouldTrack) {
           beginLoad();
         }
         
         return _fetch(...args)
           .then((res) => { 
-            if (shouldTrackRequest(url, method)) {
+            if (shouldTrack) {
               endLoad(); 
             }
             return res; 
           })
           .catch((err) => { 
-            if (shouldTrackRequest(url, method)) {
+            if (shouldTrack) {
               endLoad(); 
             }
             throw err; 
@@ -340,11 +347,14 @@
       };
     })();
   
-    // If the body wasn’t available at document-start, attach bar once it exists
+    // If the body wasn't available at document-start, attach bar once it exists
     if (!document.body) {
-      new MutationObserver((_mut, obs) => {
-        if (document.body) { ensureBar(); obs.disconnect(); }
-      }).observe(document.documentElement, { childList: true, subtree: true });
+      const bodyWaiter = setInterval(() => {
+        if (document.body) {
+          clearInterval(bodyWaiter);
+          ensureBar();
+        }
+      }, 10);
     } else {
       ensureBar();
     }
