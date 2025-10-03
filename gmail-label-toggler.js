@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gmail Label Toggle
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  Toggle visibility of emails by label in Gmail
 // @author       Rogger Fabri
 // @match        https://mail.google.com/mail/*
@@ -166,6 +166,9 @@
         const inboxObserver = new MutationObserver(mutations => {
             // Only update if we have hidden labels
             if (hiddenLabels.size > 0) {
+                // Apply visibility immediately to prevent flashing
+                updateEmailVisibility();
+                // Also call debounced version for any subsequent rapid changes
                 debouncedUpdateEmailVisibility();
             }
         });
